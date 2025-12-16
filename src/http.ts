@@ -19,6 +19,59 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ];
+const BASIC_AUTH_USERNAME = process.env.BASIC_AUTH_USERNAME;
+const BASIC_AUTH_PASSWORD = process.env.BASIC_AUTH_PASSWORD;
+const BEARER_TOKENS = process.env.BEARER_TOKENS;
+
+// Optional basic auth for HTTP transport
+if ((BASIC_AUTH_USERNAME && !BASIC_AUTH_PASSWORD) || (!BASIC_AUTH_USERNAME && BASIC_AUTH_PASSWORD)) {
+  console.error("Error: BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD must both be set or both be unset");
+  process.exit(1);
+}
+
+const bearerTokenSet = BEARER_TOKENS
+  ? new Set(
+      BEARER_TOKENS.split(",")
+        .map(token => token.trim())
+        .filter(Boolean)
+    )
+  : undefined;
+
+if (BASIC_AUTH_USERNAME && BASIC_AUTH_PASSWORD) {
+  app.use((req, res, next) => {
+    const header = req.headers.authorization;
+
+    // Basic auth
+    if (header && header.startsWith("Basic ")) {
+      let creds: string;
+      try {
+        creds = Buffer.from(header.slice("Basic ".length), "base64").toString("utf8");
+      } catch {
+        res.setHeader("WWW-Authenticate", 'Basic realm="Perplexity MCP"');
+        return res.status(401).send("Unauthorized");
+      }
+
+      const [username, ...passwordParts] = creds.split(":");
+      const password = passwordParts.join(":");
+
+      if (username === BASIC_AUTH_USERNAME && password === BASIC_AUTH_PASSWORD) {
+        return next();
+      }
+    }
+
+    // Bearer token
+    if (bearerTokenSet && header && header.startsWith("Bearer ")) {
+      const token = header.slice("Bearer ".length).trim();
+      if (token && bearerTokenSet.has(token)) {
+        return next();
+      }
+    }
+
+    // Unauthorized
+    res.setHeader("WWW-Authenticate", 'Basic realm="Perplexity MCP"');
+    return res.status(401).send("Unauthorized");
+  });
+}
 
 // CORS configuration for browser-based MCP clients
 app.use(cors({
@@ -86,8 +139,13 @@ app.get("/health", (req, res) => {
 app.listen(PORT, BIND_ADDRESS, () => {
   console.log(`Perplexity MCP Server listening on http://${BIND_ADDRESS}:${PORT}/mcp`);
   console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
+  if (BASIC_AUTH_USERNAME) {
+    console.log("HTTP Basic Auth enabled for MCP endpoint");
+  }
+  if (bearerTokenSet && bearerTokenSet.size > 0) {
+    console.log("HTTP Bearer Auth enabled for MCP endpoint");
+  }
 }).on("error", (error) => {
   console.error("Server error:", error);
   process.exit(1);
 });
-
