@@ -21,6 +21,7 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || [
 ];
 const BASIC_AUTH_USERNAME = process.env.BASIC_AUTH_USERNAME;
 const BASIC_AUTH_PASSWORD = process.env.BASIC_AUTH_PASSWORD;
+const BEARER_TOKENS = process.env.BEARER_TOKENS;
 
 // Optional basic auth for HTTP transport
 if ((BASIC_AUTH_USERNAME && !BASIC_AUTH_PASSWORD) || (!BASIC_AUTH_USERNAME && BASIC_AUTH_PASSWORD)) {
@@ -28,29 +29,45 @@ if ((BASIC_AUTH_USERNAME && !BASIC_AUTH_PASSWORD) || (!BASIC_AUTH_USERNAME && BA
   process.exit(1);
 }
 
+const bearerTokenSet = BEARER_TOKENS
+  ? new Set(
+      BEARER_TOKENS.split(",")
+        .map(token => token.trim())
+        .filter(Boolean)
+    )
+  : undefined;
+
 if (BASIC_AUTH_USERNAME && BASIC_AUTH_PASSWORD) {
   app.use((req, res, next) => {
     const header = req.headers.authorization;
-    if (!header || !header.startsWith("Basic ")) {
-      res.setHeader("WWW-Authenticate", 'Basic realm="Perplexity MCP"');
-      return res.status(401).send("Unauthorized");
+
+    // Basic auth
+    if (header && header.startsWith("Basic ")) {
+      let creds: string;
+      try {
+        creds = Buffer.from(header.slice("Basic ".length), "base64").toString("utf8");
+      } catch {
+        res.setHeader("WWW-Authenticate", 'Basic realm="Perplexity MCP"');
+        return res.status(401).send("Unauthorized");
+      }
+
+      const [username, ...passwordParts] = creds.split(":");
+      const password = passwordParts.join(":");
+
+      if (username === BASIC_AUTH_USERNAME && password === BASIC_AUTH_PASSWORD) {
+        return next();
+      }
     }
 
-    let creds: string;
-    try {
-      creds = Buffer.from(header.slice("Basic ".length), "base64").toString("utf8");
-    } catch {
-      res.setHeader("WWW-Authenticate", 'Basic realm="Perplexity MCP"');
-      return res.status(401).send("Unauthorized");
+    // Bearer token
+    if (bearerTokenSet && header && header.startsWith("Bearer ")) {
+      const token = header.slice("Bearer ".length).trim();
+      if (token && bearerTokenSet.has(token)) {
+        return next();
+      }
     }
 
-    const [username, ...passwordParts] = creds.split(":");
-    const password = passwordParts.join(":");
-
-    if (username === BASIC_AUTH_USERNAME && password === BASIC_AUTH_PASSWORD) {
-      return next();
-    }
-
+    // Unauthorized
     res.setHeader("WWW-Authenticate", 'Basic realm="Perplexity MCP"');
     return res.status(401).send("Unauthorized");
   });
@@ -78,11 +95,6 @@ app.use(cors({
 app.use(express.json());
 
 const mcpServer = createPerplexityServer();
-
-// Simple liveness probe for MCP path
-app.get("/mcp/healthz", (_req, res) => {
-  res.status(200).json({ status: "ok" });
-});
 
 /**
  * POST: client-to-server messages (requests, responses, notifications)
@@ -129,6 +141,9 @@ app.listen(PORT, BIND_ADDRESS, () => {
   console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
   if (BASIC_AUTH_USERNAME) {
     console.log("HTTP Basic Auth enabled for MCP endpoint");
+  }
+  if (bearerTokenSet && bearerTokenSet.size > 0) {
+    console.log("HTTP Bearer Auth enabled for MCP endpoint");
   }
 }).on("error", (error) => {
   console.error("Server error:", error);
